@@ -164,6 +164,12 @@ aireplay-ng --test mon0 # "Injection is working!" = monitor + injection OK
 8. Firmware Debian mudou de path: usr/lib/firmware/htc_9271.fw (não lib/firmware/ath9k_htc/)
 9. Testar AO VIVO via insmod antes de rebootar — valida modversions na hora
 10. **DOUBLE-FREE no ath9k_wmi_cmd (patch MTK/LOST0113!)**: o kernel do Moto G22 (LOST0113 lineage-20) tem um kfree_skb(skb) EXTRA no caminho de timeout do ath9k_wmi_cmd (wmi.c) que o upstream torvalds v4.19 NÃO tem. Quando o chip não responde ("Target is unresponsive" = timeout), o kfree_skb libera o skb que JÁ foi entregue ao URB (htc_send -> hif_usb_send_mgmt) e o callback do URB libera DE NOVO -> double-free/UAF -> corrupção de memória -> panic em código não relacionado (visto: sock_has_perm/SELinux) -> REBOOT ao plugar o dongle. Sintoma no pstore: "unix: Attempt to release alive unix socket" + kfree_skb chamado de ath9k_wmi_cmd. FIX: remover a linha kfree_skb(skb) do timeout path (comparar com raw.githubusercontent.com/torvalds/linux/v4.19/.../wmi.c)
+11. **DEPOIS de rebuildar o .ko com fix, ATUALIZAR a pasta do módulo NO CELULAR**: testar via /data/local/tmp funciona, mas se o celular reiniciar, o service.sh carrega os .ko da pasta /data/adb/modules/... que podem ser os ANTIGOS -> bug volta. SEMPRE copiar os .ko novos pra pasta do módulo no device e conferir md5. Push direto pra /data/adb/modules dá "Permission denied" (SELinux/Magisk) — push pra /data/local/tmp e cp via su:
+```
+adb push ath.ko ath9k_hw.ko ath9k_common.ko ath9k_htc.ko /data/local/tmp/
+adb shell su -c "cp /data/local/tmp/*.ko /data/adb/modules/<mod>/system/lib/modules/ && chmod 644 /data/adb/modules/<mod>/system/lib/modules/*.ko"
+adb shell su -c "md5sum /data/adb/modules/<mod>/system/lib/modules/*.ko"   # conferir com os locais
+```
 
 ## Debug de crash ao plugar o dongle (kernel panic/reboot)
 Se o celular REINICIAR ao plugar o AR9271 = kernel panic. O trace está no pstore:
