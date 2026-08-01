@@ -1,0 +1,6 @@
+id=kernel-hacking-features
+name=Kernel Hacking Features
+version=v1.0
+versionCode=1
+author=weslleymirandadev
+description=Firmware e suporte pro Atheros AR9271 (ath9k_htc) + .ko no boot
