@@ -170,6 +170,30 @@ adb push ath.ko ath9k_hw.ko ath9k_common.ko ath9k_htc.ko /data/local/tmp/
 adb shell su -c "cp /data/local/tmp/*.ko /data/adb/modules/<mod>/system/lib/modules/ && chmod 644 /data/adb/modules/<mod>/system/lib/modules/*.ko"
 adb shell su -c "md5sum /data/adb/modules/<mod>/system/lib/modules/*.ko"   # conferir com os locais
 ```
+⚠️ VARIANTE PERIGOSA: se o usuário re-flashar um ZIP ANTIGO do módulo pelo app Magisk (Instalar do armazenamento), a pasta do módulo volta pros .ko antigos (md5 volta pro binário bugado). Depois de atualizar a pasta via cp, conferir md5 de novo ANTES de testar — o md5 na pasta é a fonte da verdade, não o que você buildou.
+12. **DOUBLE-FREE também no htc_hst.c (patch MTK/LOST0113)**: além do wmi.c (pitfall #10), o htc_hst.c tem TRÊS kfree_skb(skb) extras nos timeout paths de htc_setup_complete, htc_config_pipe_credits e htc_connect_service (upstream v4.19 não tem). Esses rodam ANTES do wmi_cmd durante o probe (setup/config/connect do HTC) — se o chip não responde logo no início, o double-free acontece aí e o crash aparece DEPOIS no ath9k_wmi_cmd (out: path, quando htc_send_epid retorna erro com skb já liberado = UAF). FIX: remover TODOS os kfree_skb(skb) que precedem "return -ETIMEDOUT" no htc_hst.c (comparar com upstream torvalds v4.19). Verificação:
+```
+grep -B1 "return -ETIMEDOUT;" htc_hst.c | grep -c kfree_skb   # deve ser 0
+grep -c "kfree_skb(skb);" htc_hst.c                            # 8 = só os err: paths legítimos
+```
+13. **module_layout / Module.symvers (layout das structs)**: compilar .ko com `make M=...` SEM o kernel buildado = sem Module.symvers = o modpost NÃO gera o símbolo module_layout no __versions do .ko. O kernel carrega mesmo assim (warning "no symbol version for module_layout") mas NÃO valida o layout das structs internas (sk_buff, htc_frame_hdr etc). Se a source divergir do kernel real, o driver escreve em offsets errados -> corrupção silenciosa -> panic em código aleatório (sock_has_perm, find_css_set, list_add corruption). VERIFICAR compatibilidade antes de confiar:
+```
+# CRC que o kernel ESPERA (do .ko stock do aparelho):
+python3 scripts/extract_crcs.py ref-ko/wlan_drv_gen4m.ko module_layout
+# CRC da SUA source (do kernel/module.o compilado):
+make ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- kernel/module.o
+readelf -r kernel/module.o | grep module_layout   # R_AARCH64_ABS32 __crc_module_layout + 0
+```
+Se os dois CRCs batem = layout compatível, pode usar. (No Moto G22: source 9d3000233 vs kernel 63320c935368 deram AMBOS 0x95f51c8b.) Se não batem, só a source exata do kernel resolve. Build do kernel inteiro NÃO é necessário pra isso — kernel/module.o compila isolado (os stubs MTK quebrados: tinno/, mtk_trace.o, sound/soc/mediatek — não bloqueiam esse arquivo).
+14. **ADB over Wi-Fi (porta USB única)**: com o dongle no OTG não dá pra ter o cabo ADB ao mesmo tempo. Ativar ADB TCP antes de plugar:
+```
+adb tcpip 5555
+adb shell ip -o -4 addr show wlan0   # pegar IP
+adb connect <IP>:5555
+# aí pode tirar o cabo e plugar o dongle; adb continua pela rede
+adb -s <IP>:5555 shell su -c "dmesg | ..."
+```
+15. **Primeiro plug pode falhar no reset (timeout), o SEGUNDO completa**: sintoma: FW carrega, HTC 33 credits, FW Version OK, depois 7.4s de silêncio (timeouts no set_reset_reg/ath9k_hw_disable) e "USB layer deinitialized" = probe abortou limpo. Tirar e plugar DE NOVO costuma completar o probe (wlan1 sobe). Não é bug — é comportamento do dongle/energia do OTG.
 
 ## Debug de crash ao plugar o dongle (kernel panic/reboot)
 Se o celular REINICIAR ao plugar o AR9271 = kernel panic. O trace está no pstore:
@@ -177,12 +201,27 @@ Se o celular REINICIAR ao plugar o AR9271 = kernel panic. O trace está no pstor
 adb shell su -c "cat /sys/fs/pstore/console-ramoops-0" > pstore.txt
 # procurar: "Kernel panic", "Call trace", "PC is at", "ath9k", "Attempt to release"
 ```
-- WARNING "unix: Attempt to release alive unix socket" chamado de ath9k_wmi_cmd = double-free do skb (pitfall #10)
-- Panic em sock_has_perm/SELinux logo depois = corrupção de memória vazando de outro subsistema (consequência, não causa)
+- WARNING "unix: Attempt to release alive unix socket" chamado de ath9k_wmi_cmd = double-free do skb (pitfall #10 E #12 — verificar AMBOS os arquivos)
+- Panic em sock_has_perm/SELinux, find_css_set/cgroup ou list_add corruption logo depois = corrupção de memória vazando de outro subsistema (consequência, não causa)
 - Verificar se o fix está no binário: aarch64-linux-gnu-objdump -d ath9k_htc.ko | awk '/<ath9k_wmi_cmd>:/,/^$/' | grep -c kfree_skb -> deve ser 1 (só o out: path), não 2
+- Offset do crash no trace identifica o caminho: ath9k_wmi_cmd+0x138/0x190 = kfree_skb do OUT: path (htc_send_epid retornou erro com skb já liberado = UAF vindo de outro lugar, ex: htc_hst.c). O LR (link register) aponta pra instrução DEPOIS do bl kfree_skb, então +0x138 com bl em +0x134 é o mesmo kfree_skb.
+- IMPORTANTE: o tamanho da função no trace (ex: ath9k_wmi_cmd+0x138/0x190) identifica QUAL binário crashou. Binários com kfree_skb extra no timeout têm a função MAIOR. Comparar o tamanho (/0x190) com o objdump do binário que VOCÊ buildou vs o que está na pasta do módulo — se não bate, o crash foi com .ko stale (pitfall #11/#13).
+- pstore guarda o crash do boot ANTERIOR: conferir o uptime atual vs o timestamp do crash no pstore. Se o uptime atual é maior que o timestamp, o crash foi num boot antigo — pode ser de um binário que já foi corrigido.
 
 ## Verificação final
 - lsmod mostra ath9k_htc carregado após reboot
 - dmesg sem "Unknown symbol"
-- Plugar AR9271 -> dmesg "Firmware htc_9271.fw successfully loaded" + interface nova
-- Nethunter: aireplay-ng --test = "Injection is working!"
+- Plugar AR9271 -> dmesg com o fluxo completo:
+```
+usb 1-1: new high-speed USB device
+usb 1-1: ath9k_htc: Transferred FW: htc_9271.fw, size: 50980
+ath9k_htc 1-1:1.0: ath9k_htc: HTC initialized with 33 credits
+ath9k_htc 1-1:1.0: ath9k_htc: FW Version: 1.3
+ath9k_htc 1-1:1.0: FW RMW support: Off        # normal pra FW < 1.4, não é erro
+ath: EEPROM regdomain ...                      # leitura da EEPROM = chip respondendo
+ip link show wlan1                             # interface NOVA (wlan0 é a MTK interna)
+ip link set wlan1 up                           # sobe; NO-CARRIER é normal sem associação
+```
+- "Firmware ath9k_htc/htc_9271-1.4.0.fw requested" + "Direct firmware load ... failed with error -2" é NORMAL: o driver tenta o -1.4.0 primeiro, não existe, cai pro htc_9271.fw. Não é erro.
+- Se o probe abortar com "USB layer deinitialized" após ~7s: tirar e plugar DE NOVO (pitfall #15)
+- Nethunter: airmon-ng start wlan1 + aireplay-ng --test = "Injection is working!"
