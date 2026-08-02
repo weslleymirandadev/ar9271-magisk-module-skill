@@ -4,6 +4,8 @@ Build `.ko` kernel modules (e.g. AR9271 / ath9k_htc USB WiFi) against the **runn
 
 Tested on: Moto G22 (hawaiip, MT6765/Helio G37, kernel 4.19.188) — but the flow works on any device with `CONFIG_MODULES=y` and `/proc/config.gz`.
 
+**Status: VERIFIED WORKING** — AR9271 plug-and-play: firmware loads, HTC initializes (33 credits), interface `wlan1` comes up, EEPROM read. Monitor mode + injection test ready via Nethunter (`airmon-ng start wlan1` → `aireplay-ng --test mon0`).
+
 ## Why this approach
 
 - Stock kernels usually don't ship ath9k_htc (or any external WiFi driver)
@@ -25,7 +27,7 @@ Tested on: Moto G22 (hawaiip, MT6765/Helio G37, kernel 4.19.188) — but the flo
 
 ## Files
 
-- `SKILL.md` — full step-by-step guide with all 9 pitfalls we hit (CRLF, MAC80211_LEDS select, vermagic `+`, clang `-Werror`, insmod order, modversions CRC validation, live test, etc.)
+- `SKILL.md` — full step-by-step guide with all 15 pitfalls we hit (CRLF, MAC80211_LEDS select, vermagic `+`, clang `-Werror`, insmod order, modversions CRC validation, MTK wmi.c + htc_hst.c double-frees, module_layout CRC check, stale .ko in module dir, ADB over Wi-Fi, first-plug reset timeout, live test, etc.)
 - `templates/module.prop` — Magisk module metadata
 - `templates/service.sh` — boot-time insmod in correct dependency order
 - `scripts/build.sh` — downloads htc_9271.fw from the Debian firmware-atheros package
